@@ -61,7 +61,9 @@ public class IptcParser extends BinaryFileParser {
 
     private static final Charset DEFAULT_CHARSET = StandardCharsets.ISO_8859_1;
     private static final int ENV_TAG_CODED_CHARACTER_SET = 90;
-    private static final byte[] CHARACTER_ESCAPE_SEQUENCE = { '\u001B', '%', 'G' };
+    private static final byte[] CHARACTER_ESCAPE_SEQUENCE_ISO_8859_1 = { '\u001B', '.', 'A' };
+    private static final byte[] CHARACTER_ESCAPE_SEQUENCE_US_ASCII = { '\u001B', '(', 'B' };
+    private static final byte[] CHARACTER_ESCAPE_SEQUENCE_UTF8 = { '\u001B', '%', 'G' };
 
     public IptcParser() {
         super(ByteOrder.BIG_ENDIAN);
@@ -86,8 +88,14 @@ public class IptcParser extends BinaryFileParser {
             }
         }
 
-        if (Objects.deepEquals(codedCharsetNormalized, CHARACTER_ESCAPE_SEQUENCE)) {
+        if (Objects.deepEquals(codedCharsetNormalized, CHARACTER_ESCAPE_SEQUENCE_UTF8)) {
             return StandardCharsets.UTF_8;
+        }
+        if (Objects.deepEquals(codedCharsetNormalized, CHARACTER_ESCAPE_SEQUENCE_ISO_8859_1)) {
+            return StandardCharsets.ISO_8859_1;
+        }
+        if (Objects.deepEquals(codedCharsetNormalized, CHARACTER_ESCAPE_SEQUENCE_US_ASCII)) {
+            return StandardCharsets.US_ASCII;
         }
         return DEFAULT_CHARSET;
     }
@@ -372,23 +380,56 @@ public class IptcParser extends BinaryFileParser {
     }
 
     public byte[] writeIptcBlock(List<IptcRecord> elements) throws ImagingException, IOException {
-        Charset charset = DEFAULT_CHARSET;
+        boolean useDefaultCharset = charsetIsSuitable(elements, DEFAULT_CHARSET);
+        if (useDefaultCharset) {
+            return writeIptcBlock(elements, null);
+        } else {
+            return writeIptcBlock(elements, StandardCharsets.UTF_8);
+        }
+    }
+
+    private byte[] getEscapeSequence(Charset charset) throws ImagingException {
+        if (StandardCharsets.UTF_8.equals(charset)) {
+            return CHARACTER_ESCAPE_SEQUENCE_UTF8;
+        }
+        if (StandardCharsets.ISO_8859_1.equals(charset)) {
+            return CHARACTER_ESCAPE_SEQUENCE_ISO_8859_1;
+        }
+        if (StandardCharsets.US_ASCII.equals(charset)) {
+            return CHARACTER_ESCAPE_SEQUENCE_US_ASCII;
+        }
+        throw new ImagingException(
+                "Unsupported character encoding: " + charset + ", only UTF-8, ISO-8859-1 or US_ASCII are allowed!");
+    }
+
+    private boolean charsetIsSuitable(List<IptcRecord> elements, Charset charset) {
+        boolean isSuitable = true;
         for (final IptcRecord element : elements) {
             final byte[] recordData = element.getValue().getBytes(charset);
             if (!new String(recordData, charset).equals(element.getValue())) {
-                charset = StandardCharsets.UTF_8;
+                isSuitable = false;
                 break;
             }
         }
+        return isSuitable;
+    }
+
+    public byte[] writeIptcBlock(List<IptcRecord> elements, Charset forcedCharset)
+            throws ImagingException, IOException {
         final ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (BinaryOutputStream bos = BinaryOutputStream.create(baos, getByteOrder())) {
-            if (!charset.equals(DEFAULT_CHARSET)) {
+            if (forcedCharset != null) {
                 bos.write(IptcConstants.IPTC_RECORD_TAG_MARKER);
                 bos.write(IptcConstants.IPTC_ENVELOPE_RECORD_NUMBER);
                 bos.write(ENV_TAG_CODED_CHARACTER_SET);
-                final byte[] codedCharset = CHARACTER_ESCAPE_SEQUENCE;
+                final byte[] codedCharset = getEscapeSequence(forcedCharset);
                 bos.write2Bytes(codedCharset.length);
                 bos.write(codedCharset);
+            }
+
+            Charset effectiveCharset = DEFAULT_CHARSET;
+            if (forcedCharset != null) {
+                effectiveCharset = forcedCharset;
             }
 
             // first, right record version record
@@ -420,7 +461,7 @@ public class IptcParser extends BinaryFileParser {
                 }
                 bos.write(element.iptcType.getType());
 
-                final byte[] recordData = element.getValue().getBytes(charset);
+                final byte[] recordData = element.getValue().getBytes(effectiveCharset);
                 /*
                  * if (!new String(recordData, charset).equals(element.getValue())) { throw new ImageWriteException( "Invalid record value, not " +
                  * charset.name()); }
